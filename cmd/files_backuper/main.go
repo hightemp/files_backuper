@@ -240,8 +240,8 @@ func getLatestBackupByServerName(serverName string) (*Backup, error) {
 	return getLatestBackupForServer(server)
 }
 
-func getLatestBackupForServer(server *Server) (*Backup, error) {
-
+func getLatestBackupsForServer(server *Server) ([]*Backup, error) {
+	return nil, nil
 }
 
 func getLatestBackup(backupConfigName string) *Backup {
