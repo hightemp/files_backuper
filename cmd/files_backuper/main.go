@@ -817,6 +817,7 @@ func ServiceLoop() {
 				}
 			}
 		}
+		log.Printf("Waiting %s...", config.Settings.CheckChangesTimeout)
 		time.Sleep(checkChangesTimeout)
 	}
 }
