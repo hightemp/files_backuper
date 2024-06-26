@@ -35,16 +35,16 @@ type Settings struct {
 	BackupsDatabase     string `yaml:"BackupsDatabase"`
 }
 
-type BackupsConfigs struct {
+type BackupConfig struct {
 	Name   string `yaml:"Name"`
 	Server string `yaml:"Server"`
 	Path   string `yaml:"Path"`
 }
 
 type Config struct {
-	Servers        []Server         `yaml:"Servers"`
-	Settings       Settings         `yaml:"Settings"`
-	BackupsConfigs []BackupsConfigs `yaml:"BackupsConfigs"`
+	Servers        []Server       `yaml:"Servers"`
+	Settings       Settings       `yaml:"Settings"`
+	BackupsConfigs []BackupConfig `yaml:"BackupConfig"`
 }
 
 type BackupedFile struct {
@@ -59,6 +59,7 @@ type Backup struct {
 	BackupServerName string         `yaml:"BackupServerName"`
 	Path             string         `yaml:"Path"`
 	CreatedAt        time.Time      `yaml:"CreatedAt"`
+	Hash             string         `yaml:"Hash"`
 	Files            []BackupedFile `yaml:"Files"`
 }
 
@@ -67,15 +68,16 @@ type Database struct {
 }
 
 var (
-	config                Config
-	database              Database
-	argConfigPath         *string
-	argBackupServerName   *string
-	argBackupName         *string
-	argUploadLatestBackup *string
-	runAsService          *bool
-	currentBackup         *Backup
-	checkChangesTimeout   time.Duration
+	config                      Config
+	database                    Database
+	argConfigPath               *string
+	argBackupServerName         *string
+	argBackupName               *string
+	argUploadLatestBackup       *string
+	argUploadLatestServerBackup *string
+	runAsService                *bool
+	currentBackup               *Backup
+	checkChangesTimeout         time.Duration
 )
 
 func LoadConfig(path string) error {
@@ -138,6 +140,31 @@ func LoadBackupsDatabase() error {
 	return nil
 }
 
+func CalculateHashOfBackup(backup *Backup) (string, error) {
+	var sumhash string
+	for _, backupFile := range backup.Files {
+		filehash, err := CalculateHashOfString(backupFile.Hash)
+		if err != nil {
+			return "", fmt.Errorf("Error calculating hash of backup file: %w", err)
+		}
+		sumhash = sumhash + filehash
+	}
+	sumhash, err := CalculateHashOfString(sumhash)
+	if err != nil {
+		return "", fmt.Errorf("Error calculating hash of backup file: %w", err)
+	}
+	return sumhash, nil
+}
+
+func CalculateHashOfString(str string) (string, error) {
+	h := sha256.New()
+	_, err := io.WriteString(h, str)
+	if err != nil {
+		return "", fmt.Errorf("Error calculating hash of String: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func CalculateFileHash(filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -164,7 +191,7 @@ func FindServerByName(name string) (*Server, error) {
 	return nil, fmt.Errorf("Server '%s' not found", name)
 }
 
-func FindBackupConfigByName(name string) (*BackupsConfigs, error) {
+func FindBackupConfigByName(name string) (*BackupConfig, error) {
 	for i := 0; i < len(config.BackupsConfigs); i++ {
 		if name == config.BackupsConfigs[i].Name {
 			return &config.BackupsConfigs[i], nil
@@ -173,8 +200,8 @@ func FindBackupConfigByName(name string) (*BackupsConfigs, error) {
 	return nil, fmt.Errorf("Backup config '%s' not found", name)
 }
 
-func FindBackupConfigsWithServerName(name string) []*BackupsConfigs {
-	var backups []*BackupsConfigs = make([]*BackupsConfigs, 0, 100)
+func FindBackupConfigsWithServerName(name string) []*BackupConfig {
+	var backups []*BackupConfig = make([]*BackupConfig, 0, 100)
 	for i := 0; i < len(config.BackupsConfigs); i++ {
 		if name == config.BackupsConfigs[i].Server {
 			backups = append(backups, &config.BackupsConfigs[i])
@@ -197,10 +224,10 @@ func loadPrivateKey(filePath string) (ssh.AuthMethod, error) {
 	return ssh.PublicKeys(signer), nil
 }
 
-func CreateBackupFolderForServer(server *Server) (string, string, error) {
+func CreateBackupFolderForServer(server *Server, backupConfig *BackupConfig) (string, string, error) {
 	currentTime := time.Now()
 	timeString := currentTime.Format("2006-01-02_15-04-05")
-	path := fmt.Sprintf("%s/%s/%s", config.Settings.BackupSaveFolder, server.Name, timeString)
+	path := fmt.Sprintf("%s/%s/%s/%s", config.Settings.BackupSaveFolder, server.Name, backupConfig.Name, timeString)
 	err := os.MkdirAll(path, 0777)
 	if err != nil {
 		return "", "", fmt.Errorf("Error creating backup folder for server '%s': %w", server.Name, err)
@@ -231,17 +258,25 @@ func parseDuration(input string) (time.Duration, error) {
 	}
 }
 
-func getLatestBackupByServerName(serverName string) (*Backup, error) {
+func getLatestBackupsByServerName(serverName string) ([]*Backup, error) {
 	server, err := FindServerByName(serverName)
 	if err != nil {
 		return nil, fmt.Errorf("Error finding server '%s': %w", serverName, err)
 	}
 
-	return getLatestBackupForServer(server)
+	return getLatestBackupsForServer(server)
 }
 
 func getLatestBackupsForServer(server *Server) ([]*Backup, error) {
-	return nil, nil
+	backupConfigs := FindBackupConfigsWithServerName(server.Name)
+
+	backups := make([]*Backup, 0, len(backupConfigs))
+	for i := 0; i < len(backupConfigs); i++ {
+		backup := getLatestBackup(backupConfigs[i].Name)
+		backups = append(backups, backup)
+	}
+
+	return backups, nil
 }
 
 func getLatestBackup(backupConfigName string) *Backup {
@@ -261,6 +296,8 @@ func getLatestBackup(backupConfigName string) *Backup {
 }
 
 func makeBackup(backupConfigName string) error {
+	log.Printf("Starting backup for config '%s'\n", backupConfigName)
+
 	backupConfig, err := FindBackupConfigByName(backupConfigName)
 
 	if err != nil {
@@ -313,7 +350,7 @@ func makeBackup(backupConfigName string) error {
 	}
 	defer client.Close()
 
-	localBackupPath, dirWithDate, err := CreateBackupFolderForServer(server)
+	localBackupPath, dirWithDate, err := CreateBackupFolderForServer(server, backupConfig)
 
 	// backupName := backupConfigName+"_"+dirWithDate
 
@@ -324,12 +361,19 @@ func makeBackup(backupConfigName string) error {
 		BackupConfigName: backupConfigName,
 		BackupServerName: backupConfig.Server,
 		Path:             localBackupPath,
+		Hash:             "",
 	}
 
 	err = copyDirectory(client, backupConfig.Path, localBackupPath)
 	if err != nil {
 		return fmt.Errorf("Failed to copy directory: %w", err)
 	}
+
+	backupHash, err := CalculateHashOfBackup(currentBackup)
+	if err != nil {
+		return fmt.Errorf("Failed to calculate backup hash: %w", err)
+	}
+	currentBackup.Hash = backupHash
 
 	database.Backups = append(database.Backups, *currentBackup)
 
@@ -366,9 +410,11 @@ func makeServerBackup(name string) error {
 		return fmt.Errorf("Can't find server: %w", err)
 	}
 
-	log.Println("Find server: %s", server.Name)
+	log.Printf("Found server: %s", server.Name)
 
 	backupsConfigs := FindBackupConfigsWithServerName(name)
+
+	log.Printf("Found %d backups configs", len(backupsConfigs))
 
 	for _, backupConfig := range backupsConfigs {
 		err = makeBackup(backupConfig.Name)
@@ -430,6 +476,19 @@ func copyFile(client *sftp.Client, remoteFile, localFile string) error {
 	err = addFileToDatabase(localFile)
 	if err != nil {
 		return fmt.Errorf("Error adding file to database: %w", err)
+	}
+
+	return nil
+}
+
+func uploadLatestServerBackup(serverName string) error {
+	backupConfigs := FindBackupConfigsWithServerName(serverName)
+
+	for _, backupConfig := range backupConfigs {
+		err := uploadLatestBackup(backupConfig.Name)
+		if err != nil {
+			return fmt.Errorf("Error uploading latest backup: %w", err)
+		}
 	}
 
 	return nil
@@ -559,12 +618,20 @@ func uploadDirectory(client *sftp.Client, localDir, remoteDir string) error {
 	return nil
 }
 
+func ServiceLoop() {
+	log.Printf("Running as service")
+	for {
+		time.Sleep(checkChangesTimeout)
+	}
+}
+
 func main() {
 	argConfigPath = flag.String("config", "./config.yaml", "Config file path")
 	runAsService = flag.Bool("run_as_service", false, "Run as service")
 	argBackupServerName = flag.String("backup_server", "", "Command for forsing backup server, arg as server name")
 	argBackupName = flag.String("backup", "", "Command for forsing backup, arg as backup name")
 	argUploadLatestBackup = flag.String("upload_latest_backup", "", "Command for uploading latest backup, arg as backup name")
+	argUploadLatestServerBackup = flag.String("upload_latest_server_backup", "", "Command for uploading latest server backup, arg as server name")
 
 	flag.Parse()
 
@@ -600,10 +667,11 @@ func main() {
 		}
 	}
 
+	if *argUploadLatestServerBackup != "" {
+		uploadLatestServerBackup(*argUploadLatestServerBackup)
+	}
+
 	if *runAsService {
-		log.Printf("Running as service")
-		for {
-			time.Sleep(checkChangesTimeout)
-		}
+		ServiceLoop()
 	}
 }

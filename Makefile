@@ -28,6 +28,8 @@ clean:
 
 # Запуск проекта
 run:
-	$(BUILD_DIR)/$(BINARY_NAME) -config=$(BUILD_DIR)/config.yaml -backup=hlr_rails_common_config
+	$(BUILD_DIR)/$(BINARY_NAME) -config=$(BUILD_DIR)/config.yaml -backup_server=stage
+	# $(BUILD_DIR)/$(BINARY_NAME) -config=$(BUILD_DIR)/config.yaml -backup=hlr_rails_common_config
+	# $(BUILD_DIR)/$(BINARY_NAME) -config=$(BUILD_DIR)/config.yaml -run_as_service
 
 build_and_run: build run
