@@ -618,9 +618,141 @@ func uploadDirectory(client *sftp.Client, localDir, remoteDir string) error {
 	return nil
 }
 
+func CheckForChangesForBackupConfig(backupConfigName string) (bool, error) {
+	// Найти конфигурацию бэкапа по имени
+	backupConfig, err := FindBackupConfigByName(backupConfigName)
+	if err != nil {
+		return false, fmt.Errorf("Can't find backup config: %w", err)
+	}
+
+	// Найти сервер, связанный с конфигурацией бэкапа
+	server, err := FindServerByName(backupConfig.Server)
+	if err != nil {
+		return false, fmt.Errorf("Can't find server: %w", err)
+	}
+
+	// Настройка SSH-конфигурации
+	var sshConfig *ssh.ClientConfig
+	if server.Password != "" {
+		sshConfig = &ssh.ClientConfig{
+			User: server.User,
+			Auth: []ssh.AuthMethod{
+				ssh.Password(server.Password),
+			},
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		}
+	} else if server.IdentityFile != "" {
+		authMethod, err := loadPrivateKey(server.IdentityFile)
+		if err != nil {
+			return false, fmt.Errorf("Failed to load private key: %w", err)
+		}
+		sshConfig = &ssh.ClientConfig{
+			User: server.User,
+			Auth: []ssh.AuthMethod{
+				authMethod,
+			},
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		}
+	} else {
+		return false, fmt.Errorf("Can't find password or identity file")
+	}
+
+	// Подключение к серверу по SSH
+	addr := fmt.Sprintf("%s:%d", server.Host, server.Port)
+	sshConn, err := ssh.Dial("tcp", addr, sshConfig)
+	if err != nil {
+		return false, fmt.Errorf("Failed to dial SSH: %w", err)
+	}
+	defer sshConn.Close()
+
+	// Создание SFTP-клиента
+	client, err := sftp.NewClient(sshConn)
+	if err != nil {
+		return false, fmt.Errorf("Failed to create SFTP client: %w", err)
+	}
+	defer client.Close()
+
+	// Получение последнего бэкапа для данной конфигурации бэкапа
+	latestBackup := getLatestBackup(backupConfigName)
+	if latestBackup == nil {
+		return false, fmt.Errorf("No backup found for config: %s", backupConfigName)
+	}
+
+	// Сравнение хеш-сумм файлов
+	for _, backupedFile := range latestBackup.Files {
+		remoteFilePath := filepath.Join(backupConfig.Path, backupedFile.RelativePath)
+		remoteFileHash, err := CalculateRemoteFileHash(client, remoteFilePath)
+		if err != nil {
+			return false, fmt.Errorf("Error calculating remote file hash: %w", err)
+		}
+
+		if remoteFileHash != backupedFile.Hash {
+			// Если хеши не совпадают, значит файл изменился
+			return true, nil
+		}
+	}
+
+	// Если изменений не найдено
+	return false, nil
+}
+
+func CalculateRemoteFileHash(client *sftp.Client, remoteFilePath string) (string, error) {
+	remoteFile, err := client.Open(remoteFilePath)
+	if err != nil {
+		return "", fmt.Errorf("Failed to open remote file: %w", err)
+	}
+	defer remoteFile.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, remoteFile); err != nil {
+		return "", fmt.Errorf("Failed to calculate hash: %w", err)
+	}
+
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 func ServiceLoop() {
 	log.Printf("Running as service")
 	for {
+		for _, server := range config.Servers {
+			log.Printf("Checking server: %s", server.Name)
+			backupsConfigs := FindBackupConfigsWithServerName(server.Name)
+
+		BACKUP_CONFIG:
+			for _, backupConfig := range backupsConfigs {
+				log.Printf("Checking backup config: %s", backupConfig.Name)
+
+				backup := getLatestBackup(backupConfig.Name)
+
+				if backup == nil {
+					log.Printf("No backups found for config: %s", backupConfig.Name)
+					log.Printf("[!] Making backup")
+
+					err := makeBackup(backupConfig.Name)
+					if err != nil {
+						log.Printf("Failed to make backup: %w", err)
+						continue BACKUP_CONFIG
+					}
+				} else {
+					log.Printf("Checking for changes on server for backup config: %s", backupConfig.Name)
+
+					hasChanges, err := CheckForChangesForBackupConfig(backupConfig.Name)
+					if err != nil {
+						log.Printf("Failed to check for changes on server for backup config: %w", err)
+						continue BACKUP_CONFIG
+					}
+
+					if hasChanges {
+						log.Printf("[!] Files have been modified, making backup...")
+						err := makeBackup(backupConfig.Name)
+						if err != nil {
+							log.Printf("Failed to make backup: %w", err)
+							continue BACKUP_CONFIG
+						}
+					}
+				}
+			}
+		}
 		time.Sleep(checkChangesTimeout)
 	}
 }
