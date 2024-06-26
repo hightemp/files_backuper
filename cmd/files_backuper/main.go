@@ -800,7 +800,10 @@ func main() {
 	}
 
 	if *argUploadLatestServerBackup != "" {
-		uploadLatestServerBackup(*argUploadLatestServerBackup)
+		err = uploadLatestServerBackup(*argUploadLatestServerBackup)
+		if err != nil {
+			log.Fatalf("Can't upload latest server backup: %v", err)
+		}
 	}
 
 	if *runAsService {
