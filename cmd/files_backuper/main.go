@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -295,6 +296,64 @@ func getLatestBackup(backupConfigName string) *Backup {
 	return latestBackup
 }
 
+func removeBackup(backupName string) error {
+	log.Printf("Removing backup: %s", backupName)
+
+	// Найдем и удалим бэкап из базы данных
+	for i, backup := range database.Backups {
+		if backup.Name == backupName {
+			// Удаление файлов на диске
+			err := os.RemoveAll(backup.Path)
+			if err != nil {
+				return fmt.Errorf("Error removing backup files from disk: %w", err)
+			}
+
+			// Удаление из базы данных
+			database.Backups = append(database.Backups[:i], database.Backups[i+1:]...)
+			if err := WriteDatabaseFile(); err != nil {
+				return fmt.Errorf("Error writing updated database file: %w", err)
+			}
+
+			log.Printf("Backup %s removed successfully", backupName)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("Backup '%s' not found", backupName)
+}
+
+func removeUnnecessaryOldOnes(backupConfig *BackupConfig) error {
+	log.Printf("Removing old backups: %s", backupConfig.Name)
+
+	var backups []Backup
+	for _, backup := range database.Backups {
+		if backup.BackupConfigName == backupConfig.Name {
+			backups = append(backups, backup)
+		}
+	}
+
+	// Если количество бэкапов не превышает MaxBackupsCount, ничего не делаем
+	if len(backups) <= config.Settings.MaxBackupsCount {
+		return nil
+	}
+
+	// Удаляем старые бэкапы, чтобы их количество не превышало MaxBackupsCount
+	for len(backups) > config.Settings.MaxBackupsCount {
+		// Сортируем бэкапы по дате создания, от более старых к более новым
+		sort.SliceStable(backups, func(i, j int) bool {
+			return backups[i].CreatedAt.Before(backups[j].CreatedAt)
+		})
+
+		oldBackup := backups[0]
+		if err := removeBackup(oldBackup.Name); err != nil {
+			return fmt.Errorf("Error removing backup '%s': %w", oldBackup.Name, err)
+		}
+		backups = backups[1:]
+	}
+
+	return nil
+}
+
 func makeBackup(backupConfigName string) error {
 	log.Printf("Starting backup for config '%s'\n", backupConfigName)
 
@@ -376,6 +435,11 @@ func makeBackup(backupConfigName string) error {
 	currentBackup.Hash = backupHash
 
 	database.Backups = append(database.Backups, *currentBackup)
+
+	err = removeUnnecessaryOldOnes(backupConfig)
+	if err != nil {
+		return fmt.Errorf("Error removing old backups: %w", err)
+	}
 
 	err = WriteDatabaseFile()
 	if err != nil {
