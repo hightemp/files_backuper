@@ -67,3 +67,5 @@ Run the application with the desired flags:
 ## License
 
 MIT License
+
+[![](https://asdertasd.site/counter/files_backuper?a=1)](https://asdertasd.site/counter/files_backuper)
