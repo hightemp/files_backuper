@@ -1,0 +1,24 @@
+Servers:
+  - Name: server
+    Type: ssh
+    Host: 8.8.8.8
+    Port: 22
+    User: user
+    IdentityFile: /home/user/.ssh/id_rsa
+  - Name: server2
+    Type: ssh
+    Host: 1.1.1.1
+    Port: 22
+    User: user
+    IdentityFile: /home/user/.ssh/id_rsa
+Settings:
+  BackupSaveFolder: /home/user/files_backuper/build/backups
+  CheckChangesTimeout: 1m
+  MaxBackupsCount: 3
+  BackupsDatabase: /home/user/files_backuper/build/backups/database.yaml
+BackupConfig:
+  - Name: server_common_config
+    Server: server
+    Path: /var/www/services/user/src/common/config
+
+
