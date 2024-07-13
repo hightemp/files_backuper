@@ -15,7 +15,7 @@ Files Backuper is a application designed to automate the process of backing up a
 Clone the repository and build the application using Go:
 
 ```bash
-git clone https://github.com/yourusername/files_backuper.git
+git clone https://github.com/hightemp/files_backuper.git
 cd files_backuper
 go build -o files_backuper
 ```
